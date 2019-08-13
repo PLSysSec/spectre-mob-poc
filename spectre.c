@@ -11,9 +11,16 @@
 *
 **********************************************************************/
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #ifdef _MSC_VER
 #include <intrin.h> /* for rdtsc, rdtscp, clflush */
 #pragma optimize("gt",on)
@@ -351,11 +358,20 @@ int main(int argc,
   }
   #endif
 
-  //uint64_t alias_base = ((uint64_t)big_block) & (uint64_t)(~0x2fff);
-  //uint64_t alias_base = ((uint64_t)(&score)) & (uint64_t)(~0x2fff);
-  uint64_t alias_base = (uint64_t)malloc(0x8000) & ~0x2fff;
-  alias = (int32_t*)((((uint64_t)&dropbag) & 0x2fff) + alias_base) + 0x1000;
-  printf("dropbag: %p\n  alias: %p\n", &dropbag, alias);
+  int fd = open("mmap", O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
+  if (fd < 1) {
+    perror(NULL);
+    exit(1);
+  }
+  ftruncate(fd, 0x1000);
+  int32_t* mmap_base = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+  uint64_t alias_base = (uint64_t)mmap_base;
+  alias = (int32_t*)((((uint64_t)&dropbag) & 0xfff) + alias_base);
+  *alias = 0xCC;
+  printf("dropbag: %p\n  alias: %p\n   mmap: %p\n   diff: 0x%012x\n", &dropbag, alias, mmap_base, (uint64_t)alias - (uint64_t)mmap_base);
+
+  madvise((uint64_t)alias & ~0xfff, 0x1000, MADV_DONTNEED);
 
   for (i = 0; i < (int)sizeof(array2); i++) {
     array2[i] = 1; /* write to array2 so in RAM not copy-on-write zero pages */
