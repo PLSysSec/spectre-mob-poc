@@ -17,6 +17,8 @@ GIT_COMMIT_HASH := $(shell git rev-parse HEAD)
 CFLAGS += -DGIT_COMMIT_HASH='"$(GIT_COMMIT_HASH)"'
 endif
 endif
+COLORS ?= 1
+CFLAGS += -DCOLORS=$(COLORS)
      
 $(PROGRAM): $(SOURCE) ; $(CC) $(CFLAGS) -o $(PROGRAM) $(SOURCE)
      

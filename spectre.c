@@ -126,7 +126,15 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
   printf(">");
   for (i = 32; i < 128; i++) { // printable range
     if (results[i] > 0) {
+#if COLORS
+      if (i == array1[malicious_x])
+        printf("\x1b[1;41m");
+#endif
       printf("%c", i);
+#if COLORS
+      if (i == array1[malicious_x])
+        printf("\x1b[0m");
+#endif
     }
   }
   printf("< ");
