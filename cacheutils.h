@@ -4,7 +4,6 @@
 #include <assert.h>
 #include <unistd.h>
 #include <sys/syscall.h>
-#include <linux/perf_event.h>
 #include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -31,22 +30,6 @@ size_t CACHE_MISS = 150;
  * ============================================================ */
 
 
-// ---------------------------------------------------------------------------
-static size_t perf_fd;
-void perf_init() {
-  static struct perf_event_attr attr;
-  attr.type = PERF_TYPE_HARDWARE;
-  attr.config = PERF_COUNT_HW_CPU_CYCLES;
-  attr.size = sizeof(attr);
-  attr.exclude_kernel = 1;
-  attr.exclude_hv = 1;
-  attr.exclude_callchain_kernel = 1;
-
-  perf_fd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0);
-  assert(perf_fd >= 0);
-
-  // ioctl(perf_fd, PERF_EVENT_IOC_RESET, 0);
-}
 
 #if defined(__i386__) || defined(__x86_64__)
 // ---------------------------------------------------------------------------
