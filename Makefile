@@ -1,7 +1,7 @@
 CFLAGS +=  -O0
 
-PROGRAM = spectre.out
-SOURCE  = spectre.c
+SOURCE  = $(wildcard spectre*.c)
+PROGRAM = $(SOURCE:.c=.out)
      
 all: $(PROGRAM)
 
@@ -20,6 +20,6 @@ endif
 COLORS ?= 1
 CFLAGS += -DCOLORS=$(COLORS)
      
-$(PROGRAM): $(SOURCE) ; $(CC) $(CFLAGS) -o $(PROGRAM) $(SOURCE)
+%.out: %.c ; $(CC) $(CFLAGS) -o $@ $<
      
-clean: ; rm -f $(PROGRAM)
+clean: ; rm -f *.out

